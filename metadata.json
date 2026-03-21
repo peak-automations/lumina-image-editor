@@ -1,0 +1,5 @@
+{
+  "name": "Lumina Edit",
+  "description": "A client-side image editor for quick adjustments like cropping, resizing, blurring, and format conversion.",
+  "requestFramePermissions": []
+}
