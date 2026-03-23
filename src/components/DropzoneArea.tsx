@@ -11,7 +11,19 @@ interface DropzoneAreaProps {
 export function DropzoneArea({ onImageSelect, className }: DropzoneAreaProps) {
   const onDrop = useCallback((acceptedFiles: File[]) => {
     if (acceptedFiles && acceptedFiles.length > 0) {
-      onImageSelect(acceptedFiles[0]);
+      const file = acceptedFiles[0];
+      const img = new Image();
+      img.onload = () => {
+        if (img.width > 2400 || img.height > 2400) {
+          alert('Image exceeds maximum dimensions of 2400x2400px');
+          return;
+        }
+        onImageSelect(file);
+      };
+      img.onerror = () => {
+        alert('Failed to load image');
+      };
+      img.src = URL.createObjectURL(file);
     }
   }, [onImageSelect]);
 
@@ -38,7 +50,7 @@ export function DropzoneArea({ onImageSelect, className }: DropzoneAreaProps) {
         <p className="mb-2 text-sm text-text-muted">
           <span className="font-semibold text-text">Click to upload</span> or drag and drop
         </p>
-        <p className="text-xs text-text-muted">SVG, PNG, JPG or GIF (MAX. 800x400px)</p>
+        <p className="text-xs text-text-muted">SVG, PNG, JPG or GIF (MAX. 2400x2400px)</p>
       </div>
     </div>
   );
