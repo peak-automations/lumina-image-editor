@@ -14,10 +14,10 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
   const [imgSrc, setImgSrc] = useState('');
   const imgRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const blurCanvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // Tools state
-  const [activeTool, setActiveTool] = useState<'crop' | 'resize' | 'erase' | 'export'>('crop');
+  const [activeTool, setActiveTool] = useState<'crop' | 'resize' | 'erase' | 'remove-text' | 'export'>('crop');
   
   // Crop state
   const [crop, setCrop] = useState<Crop>();
@@ -33,6 +33,12 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
   const [brushSize, setBrushSize] = useState(20);
   const [blurPaths, setBlurPaths] = useState<{x: number, y: number, size: number}[]>([]);
 
+  // Remove Text state
+  const [isSelectingText, setIsSelectingText] = useState(false);
+  const [removeTextBrushSize, setRemoveTextBrushSize] = useState(20);
+  const [removeTextPaths, setRemoveTextPaths] = useState<{x: number, y: number, size: number}[]>([]);
+  const [isApplyingAI, setIsApplyingAI] = useState(false);
+
   // Export state
   const [exportFormat, setExportFormat] = useState<'image/png' | 'image/jpeg' | 'application/pdf'>('image/png');
   const [exportQuality, setExportQuality] = useState(0.9);
@@ -41,6 +47,7 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
   const [isProcessing, setIsProcessing] = useState(false);
   const [readyToDownload, setReadyToDownload] = useState(false);
   const [finalDataUrl, setFinalDataUrl] = useState('');
+  const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
 
   useEffect(() => {
     setCrop(undefined);
@@ -55,41 +62,51 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
   }, [imageFile]);
 
   useEffect(() => {
-    if (activeTool === 'erase' && imgRef.current && blurCanvasRef.current) {
+    if ((activeTool === 'erase' || activeTool === 'remove-text') && imgRef.current && overlayCanvasRef.current) {
       const { naturalWidth, naturalHeight } = imgRef.current;
-      if (blurCanvasRef.current.width !== naturalWidth || blurCanvasRef.current.height !== naturalHeight) {
-        blurCanvasRef.current.width = naturalWidth;
-        blurCanvasRef.current.height = naturalHeight;
+      if (overlayCanvasRef.current.width !== naturalWidth || overlayCanvasRef.current.height !== naturalHeight) {
+        overlayCanvasRef.current.width = naturalWidth;
+        overlayCanvasRef.current.height = naturalHeight;
       }
       
-      // Always redraw paths when entering erase mode to ensure canvas is up to date
-      const ctx = blurCanvasRef.current.getContext('2d');
+      // Always redraw paths when entering mode to ensure canvas is up to date
+      const ctx = overlayCanvasRef.current.getContext('2d');
       if (ctx) {
         ctx.clearRect(0, 0, naturalWidth, naturalHeight);
-        ctx.fillStyle = 'rgba(255, 0, 0, 1)';
-        blurPaths.forEach(path => {
-          ctx.beginPath();
-          ctx.arc(path.x, path.y, path.size / 2, 0, Math.PI * 2);
-          ctx.fill();
-        });
+        if (activeTool === 'erase') {
+          ctx.fillStyle = 'rgba(255, 0, 0, 1)';
+          blurPaths.forEach(path => {
+            ctx.beginPath();
+            ctx.arc(path.x, path.y, path.size / 2, 0, Math.PI * 2);
+            ctx.fill();
+          });
+        } else if (activeTool === 'remove-text') {
+          ctx.fillStyle = 'rgba(0, 255, 0, 1)'; // Use green for remove-text
+          removeTextPaths.forEach(path => {
+            ctx.beginPath();
+            ctx.arc(path.x, path.y, path.size / 2, 0, Math.PI * 2);
+            ctx.fill();
+          });
+        }
       }
     }
-  }, [activeTool, imgSrc, blurPaths]);
+  }, [activeTool, imgSrc, blurPaths, removeTextPaths]);
 
   const onImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
     const { naturalWidth, naturalHeight } = e.currentTarget;
     setResizeWidth(naturalWidth);
     setResizeHeight(naturalHeight);
-    // Initialize blur canvas
-    if (blurCanvasRef.current) {
-      blurCanvasRef.current.width = naturalWidth;
-      blurCanvasRef.current.height = naturalHeight;
-      const ctx = blurCanvasRef.current.getContext('2d');
+    // Initialize overlay canvas
+    if (overlayCanvasRef.current) {
+      overlayCanvasRef.current.width = naturalWidth;
+      overlayCanvasRef.current.height = naturalHeight;
+      const ctx = overlayCanvasRef.current.getContext('2d');
       if (ctx) {
         ctx.clearRect(0, 0, naturalWidth, naturalHeight);
       }
     }
     setBlurPaths([]);
+    setRemoveTextPaths([]);
   };
 
   const handleCropComplete = (c: PixelCrop) => {
@@ -124,24 +141,32 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
     }
   };
 
-  // Erase tool logic (drawing blur circles on a separate canvas layer)
-  const handleEraseStart = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
-    if (activeTool !== 'erase') return;
-    setIsErasing(true);
-    addBlurPoint(e);
+  // Drawing logic (Erase and Remove Text)
+  const handleDrawStart = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
+    if (activeTool === 'erase') {
+      setIsErasing(true);
+      addDrawPoint(e, 'erase');
+    } else if (activeTool === 'remove-text') {
+      setIsSelectingText(true);
+      addDrawPoint(e, 'remove-text');
+    }
   };
 
-  const handleEraseMove = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
-    if (!isErasing || activeTool !== 'erase') return;
-    addBlurPoint(e);
+  const handleDrawMove = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
+    if (activeTool === 'erase' && isErasing) {
+      addDrawPoint(e, 'erase');
+    } else if (activeTool === 'remove-text' && isSelectingText) {
+      addDrawPoint(e, 'remove-text');
+    }
   };
 
-  const handleEraseEnd = () => {
+  const handleDrawEnd = () => {
     setIsErasing(false);
+    setIsSelectingText(false);
   };
 
-  const addBlurPoint = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
-    if (!imgRef.current || !blurCanvasRef.current) return;
+  const addDrawPoint = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>, tool: 'erase' | 'remove-text') => {
+    if (!imgRef.current || !overlayCanvasRef.current) return;
     
     const rect = imgRef.current.getBoundingClientRect();
     let clientX, clientY;
@@ -160,15 +185,96 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
     const x = (clientX - rect.left) * scaleX;
     const y = (clientY - rect.top) * scaleY;
 
-    const newPath = { x, y, size: brushSize * scaleX };
-    setBlurPaths(prev => [...prev, newPath]);
+    const size = (tool === 'erase' ? brushSize : removeTextBrushSize) * scaleX;
+    const newPath = { x, y, size };
+    
+    if (tool === 'erase') {
+      setBlurPaths(prev => [...prev, newPath]);
+    } else {
+      setRemoveTextPaths(prev => [...prev, newPath]);
+    }
 
-    const ctx = blurCanvasRef.current.getContext('2d');
+    const ctx = overlayCanvasRef.current.getContext('2d');
     if (ctx) {
-      ctx.fillStyle = 'rgba(255, 0, 0, 1)'; // We use red just as a mask, actual blur happens on export
+      ctx.fillStyle = tool === 'erase' ? 'rgba(255, 0, 0, 1)' : 'rgba(0, 255, 0, 1)';
       ctx.beginPath();
       ctx.arc(x, y, newPath.size / 2, 0, Math.PI * 2);
       ctx.fill();
+    }
+  };
+
+  const applyRemoveText = async () => {
+    if (!imgRef.current || removeTextPaths.length === 0) return;
+    
+    setIsApplyingAI(true);
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error("No 2d context");
+
+      const image = imgRef.current;
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+
+      // Draw original image
+      ctx.drawImage(image, 0, 0);
+
+      // Draw the mask
+      ctx.fillStyle = 'rgba(0, 255, 0, 1)'; // Bright green mask
+      removeTextPaths.forEach(path => {
+        ctx.beginPath();
+        ctx.arc(path.x, path.y, path.size / 2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      const dataUrl = canvas.toDataURL('image/png');
+      const base64Data = dataUrl.split(',')[1];
+
+      // Call Gemini API
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: 'image/png',
+              },
+            },
+            {
+              text: 'Remove the text covered by the bright green highlights, and seamlessly fill in the background to match the surroundings.',
+            },
+          ],
+        },
+      });
+
+      let newImageUrl = '';
+      for (const part of response.candidates?.[0]?.content?.parts || []) {
+        if (part.inlineData) {
+          newImageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+          break;
+        }
+      }
+
+      if (newImageUrl) {
+        setImgSrc(newImageUrl);
+        setRemoveTextPaths([]);
+        // Clear overlay canvas
+        if (overlayCanvasRef.current) {
+          const oCtx = overlayCanvasRef.current.getContext('2d');
+          oCtx?.clearRect(0, 0, overlayCanvasRef.current.width, overlayCanvasRef.current.height);
+        }
+      } else {
+        throw new Error("No image returned from AI");
+      }
+    } catch (err) {
+      console.error("AI Text Removal failed", err);
+      alert("Failed to remove text using AI.");
+    } finally {
+      setIsApplyingAI(false);
     }
   };
 
@@ -294,6 +400,7 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
 
       setFinalDataUrl(dataUrl);
       setReadyToDownload(true);
+      setViewMode('preview');
       
     } catch (err) {
       console.error("Processing failed", err);
@@ -330,7 +437,8 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
           {[
             { id: 'crop', icon: Scissors, label: 'Crop' },
             { id: 'resize', icon: Maximize, label: 'Resize' },
-            { id: 'erase', icon: Eraser, label: 'Erase' },
+            { id: 'erase', icon: Eraser, label: 'Blur' },
+            { id: 'remove-text', icon: Type, label: 'Remove Text' },
             { id: 'export', icon: Settings2, label: 'Export' },
           ].map(t => (
             <button
@@ -413,15 +521,53 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
               <button 
                 onClick={() => {
                   setBlurPaths([]);
-                  if (blurCanvasRef.current) {
-                    const ctx = blurCanvasRef.current.getContext('2d');
-                    ctx?.clearRect(0, 0, blurCanvasRef.current.width, blurCanvasRef.current.height);
+                  if (overlayCanvasRef.current) {
+                    const ctx = overlayCanvasRef.current.getContext('2d');
+                    ctx?.clearRect(0, 0, overlayCanvasRef.current.width, overlayCanvasRef.current.height);
                   }
                 }}
                 className="w-full py-2 bg-surface-hover hover:bg-border rounded-lg text-sm transition-colors"
               >
-                Clear Erase Marks
+                Clear Blur Marks
               </button>
+            </div>
+          )}
+
+          {activeTool === 'remove-text' && (
+            <div className="space-y-4">
+              <p className="text-sm text-text-muted">Draw over text you want AI to remove seamlessly.</p>
+              <div>
+                <label className="text-xs text-text-muted mb-1 block">Brush Size: {removeTextBrushSize}px</label>
+                <input 
+                  type="range" 
+                  min="5" max="100" 
+                  value={removeTextBrushSize} 
+                  onChange={e => setRemoveTextBrushSize(parseInt(e.target.value))}
+                  className="w-full accent-primary"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => {
+                    setRemoveTextPaths([]);
+                    if (overlayCanvasRef.current) {
+                      const ctx = overlayCanvasRef.current.getContext('2d');
+                      ctx?.clearRect(0, 0, overlayCanvasRef.current.width, overlayCanvasRef.current.height);
+                    }
+                  }}
+                  className="flex-1 py-2 bg-surface-hover hover:bg-border rounded-lg text-sm transition-colors"
+                >
+                  Clear
+                </button>
+                <button 
+                  onClick={applyRemoveText}
+                  disabled={isApplyingAI || removeTextPaths.length === 0}
+                  className="flex-1 py-2 bg-primary hover:bg-primary-hover text-white rounded-lg text-sm transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isApplyingAI ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
+                  Apply AI
+                </button>
+              </div>
             </div>
           )}
 
@@ -507,55 +653,106 @@ export function ImageEditor({ imageFile, onExport, onCancel }: ImageEditorProps)
       </div>
 
       {/* Main Preview Area */}
-      <div className="flex-1 bg-surface rounded-xl border border-border overflow-hidden flex items-center justify-center relative p-4">
-        {!!imgSrc && (
-          <div 
-            className="relative max-w-full max-h-full flex items-center justify-center"
-            onMouseDown={handleEraseStart}
-            onMouseMove={handleEraseMove}
-            onMouseUp={handleEraseEnd}
-            onMouseLeave={handleEraseEnd}
-            onTouchStart={handleEraseStart}
-            onTouchMove={handleEraseMove}
-            onTouchEnd={handleEraseEnd}
-          >
-            {activeTool === 'crop' ? (
-              <ReactCrop
-                crop={crop}
-                onChange={(_, percentCrop) => setCrop(percentCrop)}
-                onComplete={handleCropComplete}
+      <div className="flex-1 bg-surface rounded-xl border border-border overflow-hidden flex flex-col relative">
+        {/* View Toggle */}
+        <div className="flex items-center justify-center p-2 border-b border-border bg-background/50">
+          <div className="flex bg-surface rounded-lg p-1 border border-border">
+            <button
+              onClick={() => setViewMode('edit')}
+              className={cn(
+                "px-6 py-1.5 rounded-md text-sm font-medium transition-colors",
+                viewMode === 'edit' ? "bg-primary text-white shadow-sm" : "text-text-muted hover:text-text"
+              )}
+            >
+              Editor
+            </button>
+            <button
+              onClick={() => setViewMode('preview')}
+              className={cn(
+                "px-6 py-1.5 rounded-md text-sm font-medium transition-colors",
+                viewMode === 'preview' ? "bg-primary text-white shadow-sm" : "text-text-muted hover:text-text"
+              )}
+            >
+              Preview
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 flex items-center justify-center relative p-4 overflow-hidden">
+          {/* Edit View */}
+          <div className={cn(
+            "relative w-full h-full flex items-center justify-center",
+            viewMode === 'edit' ? "flex" : "hidden"
+          )}>
+            {!!imgSrc && (
+              <div 
+                className="relative max-w-full max-h-full flex items-center justify-center"
+                onMouseDown={handleDrawStart}
+                onMouseMove={handleDrawMove}
+                onMouseUp={handleDrawEnd}
+                onMouseLeave={handleDrawEnd}
+                onTouchStart={handleDrawStart}
+                onTouchMove={handleDrawMove}
+                onTouchEnd={handleDrawEnd}
               >
-                <img
-                  ref={imgRef}
-                  alt="Upload"
-                  src={imgSrc}
-                  onLoad={onImageLoad}
-                  className="max-h-[70vh] object-contain pointer-events-none"
-                />
-              </ReactCrop>
-            ) : (
-              <div className="relative inline-block">
-                <img
-                  ref={imgRef}
-                  alt="Upload"
-                  src={imgSrc}
-                  onLoad={onImageLoad}
-                  className={cn(
-                    "max-w-full max-h-[70vh] block",
-                    activeTool === 'erase' ? "cursor-crosshair" : ""
-                  )}
-                  draggable={false}
-                />
-                {/* Blur Mask Overlay (Visual feedback for erasing) */}
-                <canvas
-                  ref={blurCanvasRef}
-                  className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-50"
-                  style={{ mixBlendMode: 'screen' }}
-                />
+                {activeTool === 'crop' ? (
+                  <ReactCrop
+                    crop={crop}
+                    onChange={(_, percentCrop) => setCrop(percentCrop)}
+                    onComplete={handleCropComplete}
+                  >
+                    <img
+                      ref={imgRef}
+                      alt="Upload"
+                      src={imgSrc}
+                      onLoad={onImageLoad}
+                      className="max-h-[70vh] object-contain pointer-events-none"
+                    />
+                  </ReactCrop>
+                ) : (
+                  <div className="relative inline-block">
+                    <img
+                      ref={imgRef}
+                      alt="Upload"
+                      src={imgSrc}
+                      onLoad={onImageLoad}
+                      className={cn(
+                        "max-w-full max-h-[70vh] block",
+                        (activeTool === 'erase' || activeTool === 'remove-text') ? "cursor-crosshair" : ""
+                      )}
+                      draggable={false}
+                    />
+                    {/* Mask Overlay (Visual feedback for erasing and removing text) */}
+                    <canvas
+                      ref={overlayCanvasRef}
+                      className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-50"
+                      style={{ mixBlendMode: 'screen' }}
+                    />
+                  </div>
+                )}
               </div>
             )}
           </div>
-        )}
+
+          {/* Preview View */}
+          <div className={cn(
+            "relative w-full h-full flex items-center justify-center",
+            viewMode === 'preview' ? "flex" : "hidden"
+          )}>
+            {finalDataUrl ? (
+              <img 
+                src={finalDataUrl} 
+                alt="Preview" 
+                className="max-w-full max-h-full object-contain shadow-lg rounded-md"
+              />
+            ) : (
+              <div className="text-center text-text-muted">
+                <p>No preview available.</p>
+                <p className="text-sm mt-2">Click "Confirm Changes" to generate your edited image.</p>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
